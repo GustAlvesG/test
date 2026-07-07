@@ -1,22 +1,14 @@
 #!/usr/bin/env bash
 #
-# fix-tsconfig-paths.sh
-# Testa a hipotese de que a REGRA GENERICA "@/*": ["./*"] no tsconfig.json
-# esta conflitando com as regras especificas ("@/components/*", "@/styles/*"),
-# fazendo o resolver do build procurar na pasta errada.
+# fix-tsconfig-paths2.sh  (versao corrigida)
+# Testa se a sobreposicao de "paths" no tsconfig.json e a causa do
+# "Module not found: @/components/..." no build.
 #
-# ESTRATEGIA SEGURA:
-#   1. Faz backup do tsconfig.json (tsconfig.json.bak-AAAAMMDD-HHMMSS)
-#   2. Reordena os paths: coloca as regras ESPECIFICAS antes da GENERICA
-#      e ajusta a generica "@/*" para tambem cobrir ./app/* (que e onde o
-#      codigo realmente vive), sem remover nenhum mapeamento existente.
-#   3. Limpa cache e roda o build.
-#   4. Se o build FALHAR, restaura o backup automaticamente.
-#   5. Se PASSAR, mantem a correcao e avisa para replicar no repositorio.
+# Seguro: backup + rollback automatico se o build falhar.
 #
 # Uso:
 #   cd /opt/nextjs-app
-#   sudo -u nextapp bash fix-tsconfig-paths.sh
+#   sudo -u nextapp bash fix-tsconfig-paths2.sh
 #
 set -uo pipefail
 
@@ -32,19 +24,20 @@ echo "== 1) Backup -> $BAK"
 cp "$TS" "$BAK"
 
 echo "== 2) Reescrevendo o bloco paths (especificas antes da generica)"
-# Usa node para manipular o JSON com seguranca (preserva o resto do arquivo).
-node <<'NODE'
+# Passa o caminho do tsconfig como ARGUMENTO ($1 dentro do node), nao via env.
+node - "$TS" <<'NODE'
 const fs = require('fs');
-const path = process.env.PROJ + '/tsconfig.json';
-const raw = fs.readFileSync(path, 'utf8');
+const tsPath = process.argv[2];              // <- caminho recebido como argumento
+if (!tsPath) { console.error('caminho do tsconfig nao recebido'); process.exit(1); }
+
+const raw = fs.readFileSync(tsPath, 'utf8');
 const json = JSON.parse(raw);
 
 const co = json.compilerOptions || {};
 co.baseUrl = co.baseUrl || '.';
 
-// Mapeamento desejado: especificas primeiro, generica por ULTIMO,
-// e a generica passa a cobrir tanto a raiz quanto ./app (fallback).
-const desired = {
+// Especificas primeiro; generica "@/*" por ultimo, cobrindo raiz E ./app como fallback.
+co.paths = {
   "@/components/*": ["./app/components/*"],
   "@/hooks/*":      ["./app/hooks/*"],
   "@/styles/*":     ["./styles/*"],
@@ -55,14 +48,11 @@ const desired = {
   "@/utils/*":      ["./src/utils/*"],
   "@/pages/*":      ["./app/*"],
   "@/public/*":     ["./public/*"],
-  // generica por ultimo, cobrindo raiz E app como fallback
   "@/*":            ["./*", "./app/*"]
 };
 
-co.paths = desired;
 json.compilerOptions = co;
-
-fs.writeFileSync(path, JSON.stringify(json, null, 2) + "\n", 'utf8');
+fs.writeFileSync(tsPath, JSON.stringify(json, null, 2) + "\n", 'utf8');
 console.log("   tsconfig.json reescrito. Novo bloco paths:");
 console.log(JSON.stringify(co.paths, null, 2));
 NODE
@@ -84,21 +74,16 @@ if npm run build; then
   echo "=================================================================="
   echo " BUILD PASSOU. A causa era a sobreposicao de paths no tsconfig."
   echo " Backup do original em: $BAK"
-  echo ""
-  echo " IMPORTANTE: replique essa mesma ordenacao de 'paths' no tsconfig"
-  echo " do REPOSITORIO (com o Erick), senao no proximo 'git pull' o"
-  echo " problema volta. As regras especificas devem vir ANTES da '@/*',"
-  echo " e a '@/*' deve incluir './app/*' como fallback."
+  echo " Replique essa ordenacao de 'paths' no tsconfig do REPOSITORIO"
+  echo " (com o Erick) para nao voltar no proximo git pull."
   echo "=================================================================="
 else
   echo ""
   echo "=================================================================="
-  echo " BUILD AINDA FALHOU. A causa nao era (so) o tsconfig."
-  echo " Restaurando o tsconfig.json original a partir do backup."
+  echo " BUILD AINDA FALHOU. A causa nao era o tsconfig."
+  echo " Restaurando o original a partir do backup."
   echo "=================================================================="
   cp "$BAK" "$TS"
-  echo " Original restaurado. Nada foi alterado em definitivo."
-  echo " Proximo passo: comparar package-lock.json com o do dev, ou testar"
-  echo " se o problema e a versao exata do Next.js instalada."
+  echo " Original restaurado. Nada alterado em definitivo."
   exit 2
 fi
